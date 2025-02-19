@@ -1,0 +1,121 @@
+#!/usr/bin/env python3 #这是干什么
+__version__ = '1.0.0'
+#python3 /data/1/wuxiaomia/svim-asm/src/svim_asm/svim-asm diploid ./cuteasm1 /data/1/wuxiaomia/data/aln/chr1_chr2.bam /data/1/wuxiaomia/data/aln/h2_chr1_2.bam /data/1/wuxiaomia/data/chr1_chr2.fa
+import sys
+import os
+import re
+import gzip
+import logging
+import pysam
+from pysam import FastaFile
+from time import strftime, localtime
+
+from cute_input_parsing import *
+from cute_out_format import write_final_vcf
+from cute_collect import analyze_alignment_file_coordsorted
+from cute_genotyping import genotyping
+#from svim_asm.SVIM_COMBINE import pair_candidates, write_final_vcf
+
+def main():
+     # Set up logging
+    options,argv = parse_arguments(program_version=__version__)
+    logFormatter = logging.Formatter("%(asctime)s [%(levelname)-7.7s]  %(message)s")
+    rootLogger = logging.getLogger()
+    if options.verbose:
+        rootLogger.setLevel(logging.DEBUG)
+    else:
+        rootLogger.setLevel(logging.INFO)
+
+    # Create working dir if it does not exist
+    if not os.path.exists(options.working_dir):
+        os.makedirs(options.working_dir)
+
+    # Create log file
+    fileHandler = logging.FileHandler("{0}/Cuteasm_{1}.log".format(options.working_dir, strftime("%y%m%d_%H%M%S", localtime())), mode="w")
+    fileHandler.setFormatter(logFormatter)
+    rootLogger.addHandler(fileHandler)
+
+    consoleHandler = logging.StreamHandler()
+    consoleHandler.setFormatter(logFormatter)
+    rootLogger.addHandler(consoleHandler)
+    logging.info("****************** Start cuteasm, version {0} ******************".format(__version__))
+    logging.info("CMD: python3 {0}".format(" ".join(sys.argv)))
+    logging.info("WORKING DIR: {0}".format(os.path.abspath(options.working_dir)))
+    for arg in vars(options):
+        logging.info("PARAMETER: {0}, VALUE: {1}".format(arg, getattr(options, arg)))
+
+    logging.info("****************** STEP 1: 变异信号处理 ******************")
+    if options.sub=='haploid':
+        pass
+    elif options.sub=="diploid":
+        logging.info("MODE: diploid")
+        logging.info("INPUT1: {0}".format(os.path.abspath(options.bam_file1)))
+        logging.info("INPUT2: {0}".format(os.path.abspath(options.bam_file2)))
+        aln_file1 = pysam.AlignmentFile(options.bam_file1)
+        aln_file2 = pysam.AlignmentFile(options.bam_file2)
+        try:
+         #文件类型检查 索引检查
+            if aln_file1.header["HD"]["SO"] == "coordinate":
+                try:
+                    aln_file1.check_index()
+                except ValueError:
+                    logging.error("The first input BAM file is missing an index. Please generate with 'samtools index'. Exiting..")
+                    return
+                except AttributeError:
+                    logging.error("pysam's .check_index raised an Attribute error. Something is wrong with the first input BAM file. Exiting..")
+                    return
+                #变异信号收集
+                sv_candidates1 = analyze_alignment_file_coordsorted(aln_file1,aln_file1.references, options)    
+            else:
+                logging.error("The first input BAM file needs to be coordinate-sorted. Exiting..")
+                return
+        except KeyError:
+            return 
+        #假设文件正常
+        try:
+         #文件类型检查 索引检查
+            if aln_file2.header["HD"]["SO"] == "coordinate":
+                try:
+                    aln_file2.check_index()
+                except ValueError:
+                    logging.error("The second input BAM file is missing an index. Please generate with 'samtools index'. Exiting..")
+                    return
+                except AttributeError:
+                    logging.error("pysam's .check_index raised an Attribute error. Something is wrong with the first input BAM file. Exiting..")
+                    return
+                #变异信号收集
+                sv_candidates2 = analyze_alignment_file_coordsorted(aln_file2, aln_file2.references,options)    
+            else:
+                logging.error("The first input BAM file needs to be coordinate-sorted. Exiting..")
+                return
+        except KeyError:
+            return 
+
+    #对单倍型和双倍型都要进行变异信号处理
+    #为什么要打开fasta 参考基因组的文件 比对为了提取del序列
+        try:
+            reference = FastaFile(options.genome)
+        except ValueError:
+            logging.error("The given reference genome is missing an index file ({path}.fai). Sequence alleles cannot be retrieved.".format(options.genome))
+            return
+        except IOError:
+            logging.error("The given reference genome is missing ({path}). Sequence alleles cannot be retrieved.".format(options.genome))
+            return
+    logging.info("****************** STEP 2: 复杂变异处理 ******************")
+    #基因分型
+    logging.info("****************** STEP 3: 基因分型 ******************")
+    can=genotyping(sv_candidates1,sv_candidates2,reference)
+    #输出vcf
+    logging.info("****************** STEP 4: OUTPUT ******************")
+    
+
+    # Write SV candidates
+    logging.info("Write SV candidates..")
+    write_final_vcf(can,aln_file1.references,aln_file1.lengths,reference,argv,options)
+    logging.info("Done.")
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:
+        logging.error(e, exc_info=True)
