@@ -1,121 +1,318 @@
-#!/usr/bin/env python3 #这是干什么
-__version__ = '1.0.0'
-#python3 /data/1/wuxiaomia/svim-asm/src/svim_asm/svim-asm diploid ./cuteasm1 /data/1/wuxiaomia/data/aln/chr1_chr2.bam /data/1/wuxiaomia/data/aln/h2_chr1_2.bam /data/1/wuxiaomia/data/chr1_chr2.fa
-import sys
-import os
-import re
-import gzip
-import logging
+import traceback
 import pysam
-from pysam import FastaFile
+import logging
 from time import strftime, localtime
-
-from cute_input_parsing import *
-from cute_out_format import write_final_vcf
+import numpy as np
 from cute_collect import analyze_alignment_file_coordsorted
-from cute_genotyping import genotyping
-#from svim_asm.SVIM_COMBINE import pair_candidates, write_final_vcf
+from cute_out_format import *
+from cute_genotyping import pair_candidates
+from cluster import remove_invs
+# from plot import plot_sv_lengths
+# from cute_intra import is_simalar, is_simalar2
+from cute_input_parsing import *
+import time
+from multiprocessing import Pool
+import sys
+from ref_filter import remove_fp
 
-def main():
-     # Set up logging
-    options,argv = parse_arguments(program_version=__version__)
-    logFormatter = logging.Formatter("%(asctime)s [%(levelname)-7.7s]  %(message)s")
+# 定义全局变量
+types_to_output = ['DEL', 'INS', 'INV', 'DUP_TAN', 'DUP_INT', 'BND']
+del_num = 0
+ins_num = 1
+inv_num = 2
+duptan_num = 3
+dupint_num = 4
+bnd_num = 5
+
+
+# 定义处理单条染色体的函数
+def process_chromosome(args):
+    bam_path, ref_path, chromosome, options = args
+    try:
+        # 每个进程中打开文件
+        reference = pysam.FastaFile(ref_path)
+        bam = pysam.AlignmentFile(bam_path, "rb")
+        
+        # 初始化结果字典
+        sv_candidates_inter = {svtype: [] for svtype in types_to_output}
+        intra_candidates = {svtype: [] for svtype in ['DEL', 'INS']}
+        
+        # 调用分析函数
+        bnd=analyze_alignment_file_coordsorted(bam, reference, chromosome, options, sv_candidates_inter, intra_candidates)
+        
+
+        bam.close()
+        reference.close()
+        
+        return sv_candidates_inter, intra_candidates,bnd
+    except Exception as e:
+        logging.error(f"Error processing {chromosome} in {bam_path}: {e}")
+        for line in traceback.format_exc().splitlines():
+            logging.error(line)
+        return None
+
+# 定义合并结果的函数
+from cluster import merge_bnd,cluster_bnd
+def merge_results(results):
+    merged_inter = {svtype: [] for svtype in types_to_output}
+    merged_intra = {svtype: [] for svtype in ['DEL', 'INS']}
+    bnd_sv=[]
+    for res in results:
+        if res is None:
+            continue
+        sv_candidates_inter, intra_candidates,bnd = res
+        for svtype in types_to_output:
+            merged_inter[svtype].extend(sv_candidates_inter.get(svtype, []))
+        for svtype in ['DEL', 'INS']:
+            merged_intra[svtype].extend(intra_candidates.get(svtype, []))
+        bnd_sv.extend(bnd)
+    #对正常的bnd聚类
+    bndlist=merged_inter[types_to_output[bnd_num]]
+    bndlist.extend(merge_bnd(bnd_sv))
+    merged_inter[types_to_output[bnd_num]]=cluster_bnd(bndlist)
+    return merged_inter, merged_intra
+# 定义合并Atrans的函数
+from realign import cluster_cut_paste,cluster_dupint
+def mergeAtrans(inter_can, intra_can, bam, mode=0):
+    gen = '1/0' if mode == 0 else '0/1'
+    sv_candidates = []
+ 
+    for svtype in types_to_output:
+        if svtype == 'DEL':
+            type_candidates =  intra_can[svtype]
+            type_candidates.sort(key=lambda x: (x[1], x[2], x[3]))
+            for can in type_candidates:
+                sv_candidates.append(CandidateDeletion(can[1], can[2], can[3], [can[4]], gen))
+        elif svtype == 'INS':
+            type_candidates =  intra_can[svtype]
+            type_candidates.sort(key=lambda x: (x[1], x[2], x[3]))
+            for can in type_candidates:
+                sv_candidates.append(CandidateInsertion(can[1], can[2], can[3], [can[4]], can[5], gen))
+        elif svtype == 'BND':
+            for can in inter_can[svtype]:
+                # if can[0]==0:
+                #     pass
+                # elif can[0]==1:
+                #     pass
+                # else:#([5,ele1[al_chr_name],ele1[al_r_end],ele2[al_chr_name],ele2[al_r_start],readname,length,False,False]
+                sv_candidates.append(CandidateBreakend(can[1], can[2], can[3], can[4], can[0], [can[5]], bam,can[-3],can[-2],can[-1], gen))
+                
+        elif svtype == 'INV':
+            invs=remove_invs(inter_can[svtype])
+            for can in invs:
+                sv_candidates.append(CandidateInversion(can[1], can[2], can[3], can[4], [can[5]], bam, gen))
+        elif svtype == 'DUP_TAN':
+            for can in inter_can[svtype] :
+                sv_candidates.append(CandidateDuplicationTandem(can[0], can[1], can[2], can[3], can[4], [can[5]], bam, gen))
+        elif svtype == 'DUP_INT':
+            # cluster_dupint(inter_can[svtype])
+            cut_paset=[]
+            dup_int=[]
+            for can in inter_can[svtype]:
+                if can[-1]:#[-1,del_can[1],del_can[2],del_can[3]+del_can[2],chrom,ins_start,ins_end,ins_flag,readname,True]
+                    cut_paset.append(can)
+                    
+                else:#[-1,chrom,ins_start,ins_end,ins_flag,qs,len,readname,1,'pari',False]
+                    dup_int.append(can)
+                    
+            if len(cut_paset)>0:
+                cut_paset=cluster_cut_paste(cut_paset)
+                for can in cut_paset:
+                    sv_candidates.append(CandidateDuplicationInterspersed(can[1],can[2],can[3],can[4],can[5],can[6],[can[8]],bam,True,gen))
+            if len(dup_int)>0:
+                dup_int=cluster_dupint(dup_int)
+                for can in dup_int:
+                    sv_candidates.append(CandidateDuplicationInterspersed(can[1], can[2], can[3], can[1],can[5], can[5]+can[6], [can[7]], bam,False, gen,can[8]))
+    return sv_candidates
+def mergeAtrans_parts1(inter_can, intra_can):
+    gen = '1/0' 
+    sv_candidates = {svtype: [] for svtype in types_to_output}
+    for svtype in types_to_output:
+        if svtype == 'DEL':
+            type_candidates = intra_can[svtype]
+            type_candidates.sort(key=lambda x: (x[1], x[2], x[3]))
+            sv_candidates[svtype].extend(type_candidates)
+        elif svtype == 'INS':
+            type_candidates =intra_can[svtype]
+            type_candidates.sort(key=lambda x: (x[1], x[2], x[3]))
+            sv_candidates[svtype].extend(type_candidates)
+        elif svtype == 'BND':
+            sv_candidates[svtype].extend(inter_can[svtype])
+        elif svtype == 'INV':
+            sv_candidates[svtype].extend(remove_invs(inter_can[svtype]))
+        elif svtype == 'DUP_TAN':
+            sv_candidates[svtype].extend(inter_can[svtype])
+        elif svtype == 'DUP_INT':
+            sv_candidates[svtype].extend(inter_can[svtype])
+    return sv_candidates
+def mergeAtrans_part2(inter_can,bam):
+    gen = '1/0' 
+    sv_candidates = []
+    for svtype in types_to_output:
+        if svtype == 'DEL':
+            type_candidates = inter_can[svtype] 
+            for can in type_candidates:
+                sv_candidates.append(CandidateDeletion(can[1], can[2], can[3], [can[4]], gen))
+        elif svtype == 'INS':
+            type_candidates = inter_can[svtype]
+            
+            for can in type_candidates:
+                sv_candidates.append(CandidateInsertion(can[1], can[2], can[3], [can[4]], can[5], gen))
+        elif svtype == 'BND':
+            for can in inter_can[svtype]:
+                sv_candidates.append(CandidateBreakend(can[1], can[2], can[3], can[4], can[0], [can[5]], bam,can[-3],can[-2],can[-1], gen))
+        elif svtype == 'INV':
+            for can in inter_can[svtype]:
+                sv_candidates.append(CandidateInversion(can[1], can[2], can[3], can[4], [can[5]], bam, gen))
+        elif svtype == 'DUP_TAN':
+            for can in inter_can[svtype] :
+                sv_candidates.append(CandidateDuplicationTandem(can[0], can[1], can[2], can[3], can[4], [can[5]], bam, gen))
+        elif svtype == 'DUP_INT':
+             # cluster_dupint(inter_can[svtype])
+            cut_paset=[]
+            dup_int=[]
+            for can in inter_can[svtype]:
+                if can[-1]:#[-1,del_can[1],del_can[2],del_can[3]+del_can[2],chrom,ins_start,ins_end,ins_flag,readname,True]
+                    cut_paset.append(can)
+                    
+                else:#[-1,chrom,ins_start,ins_end,ins_flag,qs,len,readname,1,'pari',False]
+                    dup_int.append(can)        
+            if len(cut_paset)>0:
+                cut_paset=cluster_cut_paste(cut_paset)
+                for can in cut_paset:
+                    sv_candidates.append(CandidateDuplicationInterspersed(can[1],can[2],can[3],can[4],can[5],can[6],[can[8]],bam,True,gen))
+            if len(dup_int)>0:
+                dup_int=cluster_dupint(dup_int)
+                for can in dup_int:
+                    sv_candidates.append(CandidateDuplicationInterspersed(can[1], can[2], can[3], can[1],can[5], can[5]+can[6], [can[7]], bam,False, gen,can[8]))
+    return sv_candidates
+
+# 设置日志
+def setupLogging(work_dir,debug=False):
+    logLevel = logging.DEBUG if debug else logging.INFO
+    if not os.path.exists(work_dir):
+        os.makedirs(work_dir)
     rootLogger = logging.getLogger()
-    if options.verbose:
-        rootLogger.setLevel(logging.DEBUG)
-    else:
-        rootLogger.setLevel(logging.INFO)
-
-    # Create working dir if it does not exist
-    if not os.path.exists(options.working_dir):
-        os.makedirs(options.working_dir)
-
-    # Create log file
-    fileHandler = logging.FileHandler("{0}/Cuteasm_{1}.log".format(options.working_dir, strftime("%y%m%d_%H%M%S", localtime())), mode="w")
+    rootLogger.setLevel(logLevel)
+    if not work_dir.endswith('/'):
+        work_dir += '/'
+    fileHandler = logging.FileHandler("{0}Cuteasm_{1}.log".format(work_dir, strftime("%y%m%d_%H%M%S", localtime())), mode="w")
+    logFormatter = logging.Formatter("%(asctime)s [%(levelname)-7.7s]  %(message)s")
     fileHandler.setFormatter(logFormatter)
     rootLogger.addHandler(fileHandler)
-
     consoleHandler = logging.StreamHandler()
     consoleHandler.setFormatter(logFormatter)
     rootLogger.addHandler(consoleHandler)
-    logging.info("****************** Start cuteasm, version {0} ******************".format(__version__))
-    logging.info("CMD: python3 {0}".format(" ".join(sys.argv)))
-    logging.info("WORKING DIR: {0}".format(os.path.abspath(options.working_dir)))
-    for arg in vars(options):
-        logging.info("PARAMETER: {0}, VALUE: {1}".format(arg, getattr(options, arg)))
+    logging.info("Running %s" % " ".join(sys.argv))
 
-    logging.info("****************** STEP 1: 变异信号处理 ******************")
-    if options.sub=='haploid':
-        pass
-    elif options.sub=="diploid":
-        logging.info("MODE: diploid")
-        logging.info("INPUT1: {0}".format(os.path.abspath(options.bam_file1)))
-        logging.info("INPUT2: {0}".format(os.path.abspath(options.bam_file2)))
-        aln_file1 = pysam.AlignmentFile(options.bam_file1)
-        aln_file2 = pysam.AlignmentFile(options.bam_file2)
-        try:
-         #文件类型检查 索引检查
-            if aln_file1.header["HD"]["SO"] == "coordinate":
-                try:
-                    aln_file1.check_index()
-                except ValueError:
-                    logging.error("The first input BAM file is missing an index. Please generate with 'samtools index'. Exiting..")
-                    return
-                except AttributeError:
-                    logging.error("pysam's .check_index raised an Attribute error. Something is wrong with the first input BAM file. Exiting..")
-                    return
-                #变异信号收集
-                sv_candidates1 = analyze_alignment_file_coordsorted(aln_file1,aln_file1.references, options)    
-            else:
-                logging.error("The first input BAM file needs to be coordinate-sorted. Exiting..")
-                return
-        except KeyError:
-            return 
-        #假设文件正常
-        try:
-         #文件类型检查 索引检查
-            if aln_file2.header["HD"]["SO"] == "coordinate":
-                try:
-                    aln_file2.check_index()
-                except ValueError:
-                    logging.error("The second input BAM file is missing an index. Please generate with 'samtools index'. Exiting..")
-                    return
-                except AttributeError:
-                    logging.error("pysam's .check_index raised an Attribute error. Something is wrong with the first input BAM file. Exiting..")
-                    return
-                #变异信号收集
-                sv_candidates2 = analyze_alignment_file_coordsorted(aln_file2, aln_file2.references,options)    
-            else:
-                logging.error("The first input BAM file needs to be coordinate-sorted. Exiting..")
-                return
-        except KeyError:
-            return 
-
-    #对单倍型和双倍型都要进行变异信号处理
-    #为什么要打开fasta 参考基因组的文件 比对为了提取del序列
-        try:
-            reference = FastaFile(options.genome)
-        except ValueError:
-            logging.error("The given reference genome is missing an index file ({path}.fai). Sequence alleles cannot be retrieved.".format(options.genome))
-            return
-        except IOError:
-            logging.error("The given reference genome is missing ({path}). Sequence alleles cannot be retrieved.".format(options.genome))
-            return
-    logging.info("****************** STEP 2: 复杂变异处理 ******************")
-    #基因分型
-    logging.info("****************** STEP 3: 基因分型 ******************")
-    can=genotyping(sv_candidates1,sv_candidates2,reference)
-    #输出vcf
-    logging.info("****************** STEP 4: OUTPUT ******************")
+# 主程序
+# 主程序
+def main(args):
+    # 传递命令行参数给Options类
+    if hasattr(args, 'input'):
+        options = Options(args)
+    else:
+        options=Options()
+    ref_d=options.reference
+    # 检查输入的BAM文件是否可打开
     
-
-    # Write SV candidates
-    logging.info("Write SV candidates..")
-    write_final_vcf(can,aln_file1.references,aln_file1.lengths,reference,argv,options)
-    logging.info("Done.")
-
-if __name__ == "__main__":
     try:
-        sys.exit(main())
+        # 检查 bam1
+        with pysam.AlignmentFile(options.bam1, "rb") as bam1:
+            logging.info(f"Successfully opened BAM file: {options.bam1}")
     except Exception as e:
-        logging.error(e, exc_info=True)
+        logging.error(f"Failed to open BAM file: {options.bam1}. Error: {str(e)}")
+        sys.exit(1)
+
+    if options.bam2:
+        try:
+            # 检查 bam2（如果存在）
+            with pysam.AlignmentFile(options.bam2, "rb") as bam2:
+                logging.info(f"Successfully opened BAM file: {options.bam2}")
+        except Exception as e:
+            logging.error(f"Failed to open BAM file: {options.bam2}. Error: {str(e)}")
+            sys.exit(1)
+    if options.reference:
+        try:
+            # 检查 bam2（如果存在）
+            with pysam.FastaFile(options.reference) as ref:
+                logging.info(f"Successfully opened BAM file: {options.reference}")
+        except Exception as e:
+            logging.error(f"Failed to open BAM file: {options.reference}. Error: {str(e)}")
+            sys.exit(1)
+    if options.refbam:
+        try:
+            # 检查 bam2（如果存在）
+            with pysam.AlignmentFile(options.refbam, "rb") as refbam:
+                logging.info(f"Successfully opened BAM file: {options.refbam}")
+        except Exception as e:
+            logging.error(f"Failed to open BAM file: {options.refbam}. Error: {str(e)}")
+            sys.exit(1)
+
+    chromosomes = None
+    # 获取染色体列表（从 bam1 中获取）
+    with pysam.AlignmentFile(options.bam1, "rb") as bam1:
+        chromosomes = bam1.references
+
+    all_sv_candidates = []
+    refsvcandidates=[]
+    # 读取参考基因组的预输入候选
+    if options.refbam:
+        logging.info(f"Processing ref BAM file: {options.refbam}")
+        # 使用进程池并行处理染色体
+        pool_args = [(options.refbam, ref_d, chrom, options) for chrom in chromosomes]
+        with Pool(processes=options.threads) as pool:
+            results = pool.map(process_chromosome, pool_args)
+        
+        # 合并所有染色体的结果
+        inter_sv_candidates, intra_candidates = merge_results(results)
+        refsvcandidates = mergeAtrans_parts1(inter_sv_candidates, intra_candidates)
+        logging.info(f"Loaded {len(refsvcandidates)} reference SV candidates from {options.refbam}")
+
+
+
+    # 为每个BAM文件创建进程池
+    for bam_file in [options.bam1, options.bam2] if options.bam2 else [options.bam1]:
+        logging.info(f"Processing BAM file: {bam_file}")
+        # 使用进程池并行处理染色体
+        pool_args = [(bam_file, ref_d, chrom, options) for chrom in chromosomes]
+        with Pool(processes=options.threads) as pool:
+            results = pool.map(process_chromosome, pool_args)
+        
+        # 合并所有染色体的结果
+        inter_sv_candidates, intra_candidates = merge_results(results)
+        
+        
+        if options.refbam:
+            with pysam.AlignmentFile(bam_file, "rb") as bam:
+                sv_candidates = mergeAtrans_parts1(inter_sv_candidates, intra_candidates)
+                sv_candidates = remove_fp(sv_candidates, refsvcandidates)
+                sv_candidates = mergeAtrans_part2(sv_candidates, bam)
+                all_sv_candidates.append(sv_candidates)
+        else:
+        # 打开BAM文件并合并Atrans
+            with pysam.AlignmentFile(bam_file, "rb") as bam:
+                sv_candidates = mergeAtrans(inter_sv_candidates, intra_candidates, bam)
+                all_sv_candidates.append(sv_candidates)
+    # 如果有多个BAM文件，进行SV配对
+    if len(all_sv_candidates) > 1:
+        sv_candidates1, sv_candidates2 = all_sv_candidates
+        with pysam.AlignmentFile(options.bam1, "rb") as bam1, pysam.FastaFile(ref_d) as reference:
+            can = pair_candidates(sv_candidates1, sv_candidates2, reference, bam1, options)
+            write_final_vcf(can, bam1.references, bam1.lengths, reference, sys.argv, options)
+    else:
+        logging.warning("Only one BAM file processed, skipping pairing step.")
+        with pysam.AlignmentFile(options.bam1, "rb") as bam1, pysam.FastaFile(ref_d) as reference:
+            write_final_vcf(all_sv_candidates[0], bam1.references, bam1.lengths, reference, sys.argv, options)
+    logging.info("SV分析完成。")
+# 主入口
+def run(argv):
+    args = parseArgs(argv)
+    setupLogging(args.work_dir,args.debug)
+    starttime = time.time()
+    main(args)
+    logging.info("Finished in %0.2f seconds." % (time.time() - starttime))
+
+if __name__ == '__main__':
+    # run(sys.argv[1:])
+    main([1])

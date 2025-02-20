@@ -145,7 +145,7 @@ class Options:
             self.tandem_duplications_as_insertions = args.tandem_duplications_as_insertions
             self.interspersed_duplications_as_insertions = args.interspersed_duplications_as_insertions
             self.query_names = args.query_names
-        else:
+        else:#自定义参数
             # 基本参数
             self.input = ['/io/wuxiaomia/Titan/data/aln/Assembly/NA24385_shiJie/ch38_no_samll_hp1.bam ',
                           '/io/wuxiaomia/Titan/data/aln/Assembly/NA24385_shiJie/ch38_no_samll_hp2.bam']

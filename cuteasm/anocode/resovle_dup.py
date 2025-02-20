@@ -1,6 +1,6 @@
 import ast
 from collections import defaultdict
-
+"""先找到染色体上重复的区域，再把该区域对应的变异信号给过滤"""
 
 
 def find_dup_region(dup_candidates, Max_gap_tolerance=500, threshold=50000):

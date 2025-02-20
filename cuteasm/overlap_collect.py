@@ -6,53 +6,6 @@ import matplotlib.pyplot as plt
 from scipy.stats import norm
 from matplotlib.ticker import MaxNLocator
 
-def plot_deta1(detal_lengths):
-    
-    # 计算差值的范围和数量
-    max_distance = max(detal_lengths)
-    min_distance = min(detal_lengths)
-    bins = np.arange(min_distance, max_distance + 1, 5000)  # 设置差值块的范围和大小
-
-    # 计算每个差值块中的数量
-    counts, _ = np.histogram(detal_lengths, bins=bins)
-
-    # 计算统计值
-    mean_distance = np.mean(detal_lengths)
-    std_distance = np.std(detal_lengths)
-
-    # 绘制柱形图
-    plt.figure(figsize=(10, 6))
-    plt.bar(bins[:-1], counts, width=np.diff(bins), align='edge', color='skyblue', edgecolor='black', alpha=0.7)
-
-    # 绘制分布曲线
-    # 计算分布曲线的 x 和 y 值
-    x = np.linspace(min_distance, max_distance, 100)
-    y = norm.pdf(x, mean_distance, std_distance) * sum(counts) * np.diff(bins)[0]  # 归一化
-
-    plt.plot(x, y, color='red', linewidth=2, label='Distribution Curve')
-
-    # 设置简约风格
-    plt.xlabel('Difference Blocks', fontsize=12)
-    plt.ylabel('Count of Reads in Each Block', fontsize=12)
-    plt.title('Count of Reads in Difference Blocks with Distribution Curve', fontsize=14)
-    plt.xticks(bins, fontsize=10)  # 设置 x 轴刻度
-    plt.yticks(fontsize=10)  # 设置 y 轴刻度为整数
-    plt.grid(axis='y', linestyle='--', alpha=0.7)
-
-    # 标注统计值
-    plt.axvline(mean_distance, color='green', linestyle='--', label=f'Mean: {mean_distance:.2f}')
-    plt.axvline(mean_distance + std_distance, color='orange', linestyle='--', label=f'Std Dev: {std_distance:.2f}')
-    plt.axvline(mean_distance - std_distance, color='orange', linestyle='--')
-
-    # 添加图例
-    plt.legend()
-
-    # 确保 y 轴为整数
-    plt.gca().yaxis.get_major_locator().set_params(integer=True)
-
-    plt.tight_layout()  # 自动调整子图参数
-    plt.savefig('test.png', dpi=300)  # 保存图片
-    # plt.show()  # 显示图片
 def collect(group,detal_lengths,readname=None,d_list=None):
     
     # 提取所有 read 的结束位置并计算相邻 read 之间的差值

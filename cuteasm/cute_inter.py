@@ -11,7 +11,7 @@ from cute_candidate import *
 #全局 repeat区域
 #split_read read    q_start q_end   mapq    r_start r_end   is_reversed chr_name    aln_num ref_num
 #             0         1     2       3         4     5         6           7           8     9
-from test1 import plot
+# from test1 import plot
 from collections import Counter
 from enum import Enum
 

@@ -65,6 +65,7 @@ from overlap_collect import collect,plot_deta,plot_d
 from cute_inter import aln_filter
 from realign import paste_del_match,cluster_dupint,intra_ins_del_match
 def startic(primary, supplementaries,deta_list,d_list,header):
+    #数据统计比对前后交叠信息
     query=primary.query_sequence
     query_length=primary.infer_read_length()
     alignments = [primary] + supplementaries

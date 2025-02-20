@@ -1,3 +1,5 @@
+"""plot
+"""
 def find_permutation_cycles(original, permuted):
     n = len(original)
     visited = [False] * n  # 用于跟踪访问过的元素
@@ -33,7 +35,7 @@ def find_permutation_cycles(original, permuted):
 import matplotlib.pyplot as plt
 import numpy as np
 from collections import Counter
-def plot(reads,c=None):
+def plot(reads,c=None):#绘制横坐标为contig位置，纵坐标为reference位置的图形，同一个ref，并去掉极端值
     # 示例数据：假设有3条reads
     
     # 配置图形
